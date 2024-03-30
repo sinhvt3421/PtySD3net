@@ -21,7 +21,7 @@ class DataIteratorUsp(Sequence):
     Create Data interator over dataset
     """
 
-    def __init__(self, data, batch_size=16, n_time=5, sample=False):
+    def __init__(self, data, batch_size=16, n_time=5, image_size=256):
         """_summary_
 
         Args:
@@ -32,8 +32,9 @@ class DataIteratorUsp(Sequence):
         self.batch_size = batch_size
         self.data = data
         self.n_time = n_time
-        self.data_indexes = range(len(self.data) - self.n_time)
-        self.sample = sample
+        self.data_indexes = range(len(self.data) - self.n_time + 1)
+        self.image_size = image_size
+        self.padding = self.image_size - self.data.shape[-1]
 
         self.on_epoch_end()
 
@@ -45,13 +46,15 @@ class DataIteratorUsp(Sequence):
 
     def __getitem__(self, idx):
         indexes = self.indexes[idx * self.batch_size : (idx + 1) * self.batch_size]
+        if self.n_time > 1:
+            diff = np.array([self.data[k : k + self.n_time] for k in indexes])
+        else:
+            diff = self.data[indexes]
 
-        # if self.sample:
-        #     diff = [self.data[k : k + self.n_time] for k in indexes]
-        #     intensity = np.random.poisson(diff).astype(np.float32)
+        if self.padding > 0:
+            pad = [(0, 0)] * diff.ndim
+            pad[-1], pad[-2] = (self.padding // 2, self.padding // 2), (self.padding // 2, self.padding // 2)
+            diff_p = np.pad(diff, pad)
+            return diff_p, diff**2
 
-        #     return np.sqrt(intensity), np.sqrt(intensity) ** 2
-
-        # else:
-        diff = np.array([self.data[k : k + self.n_time] for k in indexes])
         return diff, diff**2

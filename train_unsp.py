@@ -15,10 +15,8 @@ from tensorflow.keras.models import Model
 from tensorflow.keras.optimizers.schedules import CosineDecay
 from tensorflow.keras.callbacks import *
 
-from ptynet.models import PtySPINet
+from ptynet.models import *
 from ptynet.losses import *
-from utils.general import load_exp_data, load_simu_data
-from utils.datagenerator_unsp import DataIteratorUsp
 import random
 import argparse
 import time
@@ -40,91 +38,41 @@ def main(args):
     set_seed(0)
 
     config = yaml.safe_load(open(args.dataset))
+    config["hyper"]["dist"] = args.dist
+    config["model"]["mode"] = args.mode
+    config["hyper"]["save_path"] += "_" + args.mode
+    if not args.dist:
+        config["hyper"]["save_path"] += "_mse"
 
-    unsp_model = PtySPINet(config, args.pretrained, mode="train")
-    unsp_model.model.summary()
+    if args.mode == "3d":
+        unsp_model = PtySD3Net(config, args.pretrained)
+        unsp_model.model.summary()
+    elif args.mode == "2d":
+        unsp_model = PtyBase2D(config, args.pretrained)
+        unsp_model.model.summary()
+    else:
+        print("Not available options: 3d or 2d model")
 
-    data_exp = load_simu_data(config) if config["hyper"]["sample"] else load_exp_data(config)
-    trainIter = DataIteratorUsp(data_exp, batch_size=config["hyper"]["batch_size"], sample=config["hyper"]["sample"])
+    unsp_model.create_dataset()
 
-    lr_schedule = CosineDecay(
-        1e-3,
-        1.0 * 50 * len(trainIter),
-        alpha=0.5,
-        name=None,
-    )
-    loss = negative_log_loss if config["hyper"]["dist"] else r_f_I
+    start = time.time()
+    hist = unsp_model.train(20)
+    print("Total training time: ", time.time() - start)
 
-    unsp_model.model.compile(
-        loss=loss,
-        optimizer=tf.keras.optimizers.Adam(lr_schedule),
-    )
-    if not os.path.exists("{}/models/".format(config["hyper"]["save_path"])):
-        os.makedirs("{}/models/".format(config["hyper"]["save_path"]))
+    np.save(config["hyper"]["save_path"] + "/hist_train.npy", hist.history)
 
-    callbacks = []
-
-    callbacks.append(
-        ModelCheckpoint(
-            filepath="{}/models/model_unsp.tf".format(
-                config["hyper"]["save_path"],
-            ),
-            monitor="loss",
-            save_weights_only=True,
-            verbose=2,
-            save_best_only=True,
-        )
-    )
-
-    yaml.safe_dump(
-        config,
-        open(
-            "{}/config.yaml".format(config["hyper"]["save_path"]),
-            "w",
-        ),
-        default_flow_style=False,
-    )
-    t = time.time()
-    hist = unsp_model.model.fit(
-        trainIter,
-        epochs=50,
-        callbacks=callbacks,
-        verbose=1,
-        shuffle=False,
-        use_multiprocessing=True,
-        workers=4,
-    )
-    print("Total training time: ", time.time() - t)
-
-    tf.keras.backend.clear_session()
-    infer_model = PtySPINet(config, mode="infer")
-    infer_model.model.load_weights("{}/models/model_unsp.tf".format(config["hyper"]["save_path"])).expect_partial()
-
-    all_predict_a = []
-    all_predict_p = []
-
-    t = time.time()
-    for idx in range(0, len(data_exp) - 4, 5):
-        # for idx in range(0, 50, 5):
-        a, p = infer_model.model(data_exp[idx : idx + 5][None, ...])
-
-        all_predict_a.append(a)
-        all_predict_p.append(p)
-
-    print("Total Inferences time: ", time.time() - t)
-
-    all_predict_a = np.array(all_predict_a).reshape(-1, a.shape[-1], a.shape[-1])
-    all_predict_p = np.array(all_predict_p).reshape(-1, a.shape[-1], a.shape[-1])
-    np.savez_compressed(
-        "{}/object_reconstruction.npz".format(config["hyper"]["save_path"]), [all_predict_a, all_predict_p]
-    )
+    print("Load trained model and inference: ")
+    unsp_model.inference()
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Process some integers.")
     parser.add_argument("dataset", type=str, help="Path to dataset configs")
 
+    parser.add_argument("--mode", type=str, default="3d", help="Model type 3D or 2D (optional)")
+
     parser.add_argument("--pretrained", type=str, default="", help="Path to pretrained model (optional)")
+    parser.add_argument("--dist", type=bool, default=False, help="Using Poisson distribution for output")
 
     args = parser.parse_args()
     main(args)

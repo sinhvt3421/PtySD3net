@@ -1,4 +1,6 @@
 from ptynet.layers.base_layers import *
+from ptynet.layers.encoders import *
+from ptynet.layers.decoders import *
 
 _CUSTOM_OBJECTS = globals()
 
@@ -8,10 +10,11 @@ __all__ = [
     "Conv_Up_block",
     "Conv_Up_block_3D_c",
     "mpi",
-    "lrelu",
-    "total_var",
     "Mpi",
-    "ProbeLayer",
     "RefineLayer",
-    "CNNLayer",
+    "CNNTBLayer",
+    "TBEncoder",
+    "TBDecoder",
+    "CNNEncoder",
+    "CNNDecoder",
 ]

@@ -1,0 +1,22 @@
+model:
+  filters: 8
+  kernel: 3
+  k_pool: 2
+  pool: "max"
+  n_cov: 4
+  n_dcov: 4
+  act: "swish"
+  img_size: 384
+hyper:
+  batch_size: 4
+  mode: "3d"
+  masking: "../../processed_data/PR/Mask/mask_probe_378.npy"
+  probe: "../../processed_data/PR/Mask/probe_function_378.npy"
+  probe_mode: "multi"
+  n_refine: 0
+  n_time: 5
+  sample: "chart"
+  lr: 0.001
+  probe_norm: 0.00727175 #0.00029087*25
+  save_path: "trained_models/Moving_chart_15s_7ms_nor"
+  train_data: "../../processed_data/PR/Moving_chart/dataset2_15s_25fr_7ms.npz"

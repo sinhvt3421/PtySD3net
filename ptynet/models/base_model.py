@@ -10,8 +10,9 @@ from tensorflow.keras import Model
 from tensorflow.keras.callbacks import *
 from tensorflow.keras.layers import Conv2D, Input, Lambda
 from tensorflow.keras.optimizers.schedules import CosineDecay, ExponentialDecay
-from utils.datagenerator import DataIterator
-from utils.general import load_data, split_data
+from utils.datagenerator_unsp import DataIteratorUsp
+from utils.general import dataset_functions
+import time
 
 
 class LearningRateTracker(tf.keras.callbacks.Callback):
@@ -27,42 +28,21 @@ class PtyBase:
 
     def create_dataset(self):
         cfgh = self.config["hyper"]
-        all_data, mask = load_data(cfgh)
+        self.data_exp = dataset_functions[cfgh["sample"]](self.config)
 
-        self.config["hyper"]["data_size"] = len(all_data)
-        train, valid, test, extra = split_data(len(all_data), test_size=cfgh["test_size"])
-
-        assert len(extra) == 0, "Split was inexact {} {} {} {}".format(len(train), len(valid), len(test), len(extra))
-
-        print(
-            "Number of train data : ",
-            len(train),
-            " , Number of valid data: ",
-            len(valid),
-            " , Number of test data: ",
-            len(test),
+        self.trainIter = DataIteratorUsp(
+            self.data_exp,
+            batch_size=cfgh["batch_size"],
+            image_size=self.config["model"]["img_size"],
+            n_time=self.config["hyper"]["n_time"] if self.config["model"]["mode"] == "3d" else 1,
         )
-
-        self.trainIter, self.validIter, self.testIter = [
-            DataIterator(
-                batch_size=cfgh["batch_size"],
-                data_path=all_data[indices],
-                target=cfgh["target"],
-                shuffle=(len(indices) == len(train)),
-                mask=mask,
-                mode=cfgh["mode"],
-            )
-            for indices in (train, valid, test)
-        ]
 
     def create_callbacks(self):
         callbacks = []
         callbacks.append(
             ModelCheckpoint(
-                filepath="{}_{}/models/model_{}.h5".format(
+                filepath="{}/models/model_unsp.tf".format(
                     self.config["hyper"]["save_path"],
-                    self.config["hyper"]["target"],
-                    self.config["hyper"]["target"],
                 ),
                 monitor="loss",
                 save_weights_only=True,
@@ -70,82 +50,37 @@ class PtyBase:
                 save_best_only=True,
             )
         )
-
-        callbacks.append(EarlyStopping(monitor="loss", patience=100))
-
         callbacks.append(LearningRateTracker())
-
         return callbacks
 
     def create_loss_op(self):
-        loss_name = self.config["hyper"]["loss"]
-        if loss_name == "mse":
-            loss = masked_MSEloss
-        elif loss_name == "psnr":
-            loss = PSNRLoss(self.config["hyper"]["max_val"])
-        elif loss_name == "ssim":
-            loss = SSIMLoss(self.config["hyper"]["max_val"])
-        else:
-            loss = "mae"
-
-        metrics = [
-            # SSIMMetric(self.config["hyper"]["max_val"]),
-            # PSNRMetric(self.config["hyper"]["max_val"]),
-        ]
-
-        loss_weights = None
-        if self.config["hyper"]["target"] == "a_p":
-            loss = {"amplitude": masked_MSEloss_v(1.0), "phase": masked_MSEloss_v(0.0)}
-            loss_weights = {"amplitude": 10.0, "phase": 1.0}
-
-        if self.config["hyper"]["target"] == "a_p_i":
-            loss = {
-                "amplitude": SEloss,
-                "phase": SEloss,
-                "intensity_sample": negative_log_loss,
-                "intensity_sample_r": negative_log_loss,
-                "amplitude_r": SEloss,
-                "phase_r": SEloss,
-            }
-            loss_weights = {
-                "amplitude": 10.0,
-                "phase": 10.0,
-                "amplitude_r": 1.0,
-                "phase_r": 1.0,
-                "intensity_sample_r": 1.0,
-                "intensity_sample": 1.0,
-            }
-
-        return loss, loss_weights, metrics
+        loss = negative_log_loss if self.config["hyper"]["dist"] else masked_SEloss
+        return loss
 
     def train(self, epochs):
         lr_schedule = CosineDecay(
             self.config["hyper"]["lr"],
-            1.0 * len(self.trainIter) * epochs,
+            1.0 * epochs * len(self.trainIter),
             alpha=0.2,
             name=None,
         )
-
-        loss, loss_weights, metrics = self.create_loss_op()
+        loss = self.create_loss_op()
 
         self.model.compile(
-            loss=loss,
-            loss_weights=loss_weights,
+            # No loss for prediction of amplitude and phase information
+            loss=[loss, None, None],
             optimizer=tf.keras.optimizers.Adam(lr_schedule),
-            metrics=metrics,
         )
 
-        if not os.path.exists(
-            "{}_{}/models/".format(self.config["hyper"]["save_path"], self.config["hyper"]["target"])
-        ):
-            os.makedirs("{}_{}/models/".format(self.config["hyper"]["save_path"], self.config["hyper"]["target"]))
+        if not os.path.exists("{}/models/".format(self.config["hyper"]["save_path"])):
+            os.makedirs("{}/models/".format(self.config["hyper"]["save_path"]))
 
         callbacks = self.create_callbacks()
 
         yaml.safe_dump(
             self.config,
             open(
-                "{}_{}/config.yaml".format(self.config["hyper"]["save_path"], self.config["hyper"]["target"]),
+                "{}/config.yaml".format(self.config["hyper"]["save_path"]),
                 "w",
             ),
             default_flow_style=False,
@@ -154,7 +89,6 @@ class PtyBase:
         self.hist = self.model.fit(
             self.trainIter,
             epochs=epochs,
-            validation_data=self.validIter,
             callbacks=callbacks,
             verbose=1,
             shuffle=False,
@@ -162,3 +96,44 @@ class PtyBase:
             workers=4,
         )
         return self.hist
+
+    def inference(self):
+        self.model.load_weights("{}/models/model_unsp.tf".format(self.config["hyper"]["save_path"])).expect_partial()
+
+        all_predict_a = []
+        all_predict_p = []
+
+        t = time.time()
+        padding = self.config["model"]["img_size"] - self.data_exp.shape[-1]
+
+        if padding > 0:
+            if self.config["model"]["mode"] == "2d":
+                pad = ((0, 0), (padding // 2, padding // 2), (padding // 2, padding // 2))
+            else:
+                pad = ((0, 0), (0, 0), (padding // 2, padding // 2), (padding // 2, padding // 2))
+
+        if self.config["model"]["mode"] == "2d":
+            size = self.config["hyper"]["batch_size"]
+        else:
+            size = self.config["hyper"]["n_time"]
+
+        for idx in range(0, len(self.data_exp) - size + 1, size):
+            diff = self.data_exp[idx : idx + size]
+            if self.config["model"]["mode"] == "3d":
+                diff = diff[None, ...]
+            if padding > 0:
+                diff = np.pad(diff, pad)
+
+            _, a, p = self.model(diff)
+
+            all_predict_a.append(a)
+            all_predict_p.append(p)
+
+        print("Total Inferences time: ", time.time() - t)
+
+        all_predict_a = np.array(all_predict_a).reshape(-1, a.shape[-1], a.shape[-1])
+        all_predict_p = np.array(all_predict_p).reshape(-1, a.shape[-1], a.shape[-1])
+        np.savez_compressed(
+            "{}/object_reconstruction_{}.npz".format(self.config["hyper"]["save_path"], self.config["model"]["mode"]),
+            [all_predict_a, all_predict_p],
+        )
