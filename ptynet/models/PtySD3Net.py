@@ -4,7 +4,6 @@ from tensorflow.keras.layers import Input, Lambda, Conv3D, Conv2D, Concatenate
 from ptynet.layers import *
 from tensorflow.keras.callbacks import *
 from ptynet.models import PtyBase
-from ptynet.layers.forward import combine_complex
 from ptynet.losses import total_var_3d, total_var
 
 import numpy as np
@@ -35,8 +34,8 @@ def create_model(config):
 
     if cfgh["masking"]:
         # Masking probe position
-        mask = np.load(cfgh["masking"], allow_pickle=True)[None, ...].astype(np.float32)
-        mask = tf.constant(mask)
+        mask = np.load(cfgh["masking"], allow_pickle=True)[None, ...]
+        mask = tf.constant(mask, dtype="float32")
 
     diff = Input(name="diff", shape=(None, cfgm["img_size"], cfgm["img_size"], 1), dtype="float32")
 
@@ -52,14 +51,15 @@ def create_model(config):
         name="encoder_tb",
     )(e)
 
-    # Decoder
+    # Decoder if cfgh["n_refine"] else "relu"
     da = TBDecoder(n_layers=cfgm["n_dcov"], filters=cfgm["filters"], w=cfgm["kernel"], name="decoder_amp")(latent)
-    a = Conv3D(1, (1, 1, 1), padding="same", activation="sigmoid" if cfgh["n_refine"] else "relu")(da)
+    a = Conv3D(1, (1, 1, 1), padding="same", activation="sigmoid")(da)
     a = Lambda(lambda x: tf.squeeze(x, -1), name="amp")(a)
 
     dp = TBDecoder(n_layers=cfgm["n_dcov"], filters=cfgm["filters"], w=cfgm["kernel"], name="decoder_phase")(latent)
-    p = Conv3D(1, (1, 1, 1), padding="same", activation=None)(dp)
-    p = Mpi()(p)
+    p = Conv3D(1, (1, 1, 1), padding="same", activation=mpi if cfgh["n_refine"] else None)(dp)
+    if not cfgh["n_refine"]:
+        p = Mpi()(p)
     p = Lambda(lambda x: tf.squeeze(x, -1), name="phi")(p)
 
     # Cropping objects, diffraction to match probs shape
@@ -73,10 +73,14 @@ def create_model(config):
         p = p[:, :, padding // 2 : -padding // 2, padding // 2 : -padding // 2]
 
     if cfgh["masking"]:
-        a = Lambda(lambda x: x * mask, name="amplitude")(a)
+        a = Lambda(lambda x: x, name="amplitude")(a)
         p = Lambda(lambda x: x * mask, name="phase")(p)
 
-    objects = combine_complex(a, p)
+    if cfgh["n_refine"]:
+        a = TV(0.1, "tv_a")(a)
+        p = TV(0.1, "tv_p")(p)
+
+    objects = CombineComplex()(a, p)
 
     # Refinement Block
     if "single" in cfgh["probe_mode"]:
@@ -108,15 +112,12 @@ def create_model(config):
         ar = Lambda(lambda x: tf.math.abs(x), name="amplitude_r")(objects_r)
         pr = Lambda(lambda x: tf.math.angle(x), name="phase_r")(objects_r)
 
+    ar = TV(0.1, "tv_ar")(ar)
+    pr = TV(1.0, "tv_pr", True)(pr)
+
     output.extend([ar, pr])
 
     # Training unsupervised and Inference mode options
     model = Model(inputs=diff, outputs=output)
-    # 3D total variation loss
-    if cfgh["probe_mode"] == "multi_c":
-        model.add_loss(1.0 * total_var_3d(pr))
-        model.add_loss(1.0 * total_var_3d(ar))
-        model.add_loss(0.001 * total_var_3d(p))
-        model.add_loss(0.001 * total_var_3d(a))
 
     return model

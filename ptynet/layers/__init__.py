@@ -6,15 +6,15 @@ _CUSTOM_OBJECTS = globals()
 
 __all__ = [
     "Conv_Down_block",
-    "Conv_Down_block_3D_c",
+    "Conv_Down_Temporal_Block",
     "Conv_Up_block",
-    "Conv_Up_block_3D_c",
+    "Conv_Up_Temporal_Block",
     "mpi",
     "Mpi",
+    "TV",
+    "CombineComplex",
     "RefineLayer",
     "CNNTBLayer",
     "TBEncoder",
     "TBDecoder",
-    "CNNEncoder",
-    "CNNDecoder",
 ]

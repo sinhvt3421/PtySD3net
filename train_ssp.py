@@ -38,17 +38,32 @@ def main(args):
     set_seed(0)
 
     config = yaml.safe_load(open(args.dataset))
+
     config["hyper"]["dist"] = args.dist
+    config["hyper"]["n_refine"] = args.n_refine
+    config["hyper"]["probe_mode"] = args.probe_mode
+
     config["model"]["mode"] = args.mode
-    config["hyper"]["save_path"] += "_" + args.mode
+
+    config["hyper"]["save_path"] += "_{}_r{}_{}".format(args.mode, args.n_refine, args.probe_mode)
+
     if not args.dist:
         config["hyper"]["save_path"] += "_mse"
 
     if args.mode == "3d":
+        print("Load model PtySD3Net")
         unsp_model = PtySD3Net(config, args.pretrained)
         unsp_model.model.summary()
     elif args.mode == "2d":
         unsp_model = PtyBase2D(config, args.pretrained)
+        unsp_model.model.summary()
+    elif args.mode == "autonn":
+        print("Load model AutoPhaseNN")
+        unsp_model = AutoPhaseNN(config, args.pretrained)
+        unsp_model.model.summary()
+    elif args.mode == "ptychonn":
+        print("Load model PtychoNN")
+        unsp_model = PtychoNN(config, args.pretrained)
         unsp_model.model.summary()
     else:
         print("Not available options: 3d or 2d model")
@@ -56,7 +71,7 @@ def main(args):
     unsp_model.create_dataset()
 
     start = time.time()
-    hist = unsp_model.train(20)
+    hist = unsp_model.train(args.epoch)
     print("Total training time: ", time.time() - start)
 
     np.save(config["hyper"]["save_path"] + "/hist_train.npy", hist.history)
@@ -70,9 +85,14 @@ if __name__ == "__main__":
     parser.add_argument("dataset", type=str, help="Path to dataset configs")
 
     parser.add_argument("--mode", type=str, default="3d", help="Model type 3D or 2D (optional)")
+    parser.add_argument("--n_refine", type=int, default=5, help="Refinement step for enhance reconstruction")
+    parser.add_argument(
+        "--probe_mode", type=str, default="multi_c", help="Refine probe mode: single, single_c, multi, multi_c"
+    )
 
     parser.add_argument("--pretrained", type=str, default="", help="Path to pretrained model (optional)")
     parser.add_argument("--dist", type=bool, default=False, help="Using Poisson distribution for output")
+    parser.add_argument("--epoch", type=int, default=20, help="Training epochs")
 
     args = parser.parse_args()
     main(args)

@@ -1,24 +1,16 @@
-import json
 import logging
-import random
-from concurrent.futures import ThreadPoolExecutor, wait, as_completed
 from tensorflow.keras.utils import Sequence
 from math import ceil
 import numpy as np
-from ase.db import connect
-import numpy as np
 from random import shuffle
-import tensorflow as tf
-import cv2 as cv
-from tensorflow.keras.preprocessing.sequence import pad_sequences
 
-RNG_SEED = 123
+RNG_SEED = 2134
 logger = logging.getLogger(__name__)
 
 
-class DataIteratorUsp(Sequence):
+class DataIteratorSsp(Sequence):
     """
-    Create Data interator over dataset
+    Create Data interator over dataset for self-supervised training
     """
 
     def __init__(self, data, batch_size=16, n_time=5, image_size=256):

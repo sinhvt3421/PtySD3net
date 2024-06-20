@@ -8,10 +8,13 @@ def log10(x):
     return x1 / x2
 
 
-def negative_log_loss(y_true, y_pred):
-    norm = tf.math.floor(log10(tf.reduce_max(y_true)))
-    return -y_pred.log_prob(tf.where(y_true > 3.0, y_true, 0)) / tf.pow(10.0, norm)
-    # return -y_pred.log_prob(y_true) / tf.pow(10.0, norm)
+def negative_log_loss(min_val=3.0):
+
+    def nll(y_true, y_pred):
+        norm = tf.math.floor(log10(tf.reduce_max(y_true)))
+        return -y_pred.log_prob(tf.where(y_true > min_val, y_true, 0)) / tf.pow(10.0, norm)
+
+    return nll
 
 
 def masked_SEloss(y_true, y_pred):

@@ -4,7 +4,6 @@ from tensorflow.keras.layers import Input, Lambda, Conv3D, Conv2D, Concatenate
 from ptynet.layers import *
 from tensorflow.keras.callbacks import *
 from ptynet.models import PtyBase
-from ptynet.layers.forward import combine_complex
 from ptynet.losses import total_var_3d, total_var
 
 import numpy as np
@@ -54,12 +53,12 @@ def create_model(config):
 
     # Decoder
     da = CNNDecoder(n_layers=cfgm["n_dcov"], filters=cfgm["filters"], w=cfgm["kernel"], name="decoder_amp")(latent)
-    a = Conv2D(1, 1, padding="same", activation="sigmoid" if cfgh["n_refine"] else "relu")(da)
+    a = Conv2D(1, 1, padding="same", activation="sigmoid")(da)
     a = Lambda(lambda x: tf.squeeze(x, -1), name="amp")(a)
 
     dp = CNNDecoder(n_layers=cfgm["n_dcov"], filters=cfgm["filters"], w=cfgm["kernel"], name="decoder_phase")(latent)
-    p = Conv2D(1, 1, padding="same", activation=mpi)(dp)
-    # p = Mpi()(p)
+    p = Conv2D(1, 1, padding="same", activation=None)(dp)
+    p = Mpi()(p)
     p = Lambda(lambda x: tf.squeeze(x, -1), name="phi")(p)
 
     # Cropping objects, diffraction to match probs shape
@@ -76,7 +75,7 @@ def create_model(config):
         a = Lambda(lambda x: x, name="amplitude")(a)
         p = Lambda(lambda x: x * mask, name="phase")(p)
 
-    objects = combine_complex(a, p)
+    objects = CombineComplex()(a, p)
 
     # Refinement Block
     Refine = RefineLayer(mask if cfgh["masking"] else None, cfgh["n_refine"], cfgh["probe_mode"])
@@ -97,7 +96,7 @@ def create_model(config):
 
     # Masking for output
     if cfgh["masking"]:
-        ar = Lambda(lambda x: tf.math.abs(x), name="amplitude_r")(objects_r)
+        ar = Lambda(lambda x: tf.math.abs(x) * mask, name="amplitude_r")(objects_r)
         pr = Lambda(lambda x: tf.math.angle(x) * mask, name="phase_r")(objects_r)
     else:
         ar = Lambda(lambda x: tf.math.abs(x), name="amplitude_r")(objects_r)

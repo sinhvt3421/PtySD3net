@@ -17,18 +17,20 @@ from tensorflow.keras.layers import BatchNormalization, LayerNormalization
 import tensorflow.keras as keras
 from tensorflow.keras.regularizers import l2
 from tensorflow.signal import fft2d, fftshift, ifftshift, ifft2d
-from .forward import combine_complex
+from ptynet.losses import total_var_3d
 
 
 def mpi(input_tensor):
     """
-    A modified version of relu with linear gradient.
+    A modified version of tanh with limit range to [-pi,pi]
     """
 
     return tf.tanh(input_tensor) * (math.pi)
 
-
 class Mpi(tf.keras.layers.Layer):
+    """
+        A modified version of tanh with trainable parameters limit range to [-pi,pi]
+    """
     def __init__(self, **kwargs):
         super(Mpi, self).__init__(**kwargs)
         self.alpha = tf.Variable(
@@ -38,42 +40,44 @@ class Mpi(tf.keras.layers.Layer):
     def call(self, inputs):
         return tf.math.tanh(inputs) * self.alpha
 
+def combine_complex(amp, phi):
+    return tf.cast(amp, tf.complex64) * tf.exp(1j * tf.cast(phi, tf.complex64))
 
-# Define a custom layer for CNN update
-class CNNLayer(tf.keras.layers.Layer):
-    def __init__(self, nfilters=8, w=3, dept=5, act="swish", out="sigmoid", name="", **kwargs):
-        super(CNNLayer, self).__init__(name=name, **kwargs)
-        self.cv = [Conv2D(nfilters, (w, w), padding="same", activation=act) for i in range(dept)]
 
-        self.cv_out = Conv2D(1, (w, w), padding="same", activation=None)
-        self.norm = BatchNormalization()
+class CombineComplex(tf.keras.layers.Layer):
+    def call(self, amp, phi):
+        return combine_complex(amp,phi)
 
-        self.act_out = Activation("sigmoid") if out == "sigmoid" else Mpi()
+class TV(tf.keras.layers.Layer):
+    def __init__(self, gama, name="TV", train=False, **kwargs):
+        super(TV, self).__init__(name=name, **kwargs)
+        self.gama = tf.Variable(
+            gama,
+            name="gama_{}".format(name),
+            trainable=train,
+            constraint=lambda x: tf.clip_by_value(x, 0.1, 2.0),
+        )
 
     def call(self, inputs):
-        x = tf.expand_dims(inputs, -1)
-
-        for i in range(len(self.cv)):
-            x = self.cv[i](x)
-
-        x = self.norm(x)
-
-        return tf.squeeze(self.act_out(self.cv_out(x)), -1)
+        self.add_loss(self.gama * total_var_3d(inputs))
+        return inputs
 
 
 # Define a custom TB layer for CNN update
 class CNNTBLayer(tf.keras.layers.Layer):
     def __init__(self, nfilters=32, w=3, dept=1, act="swish", out="sigmoid", name="", **kwargs):
         super(CNNTBLayer, self).__init__(name=name, **kwargs)
-        self.cv = [Conv_Down_block_3D_c(nfilters, w, padding="same", act=act, pool=False) for i in range(dept)]
+        self.cv = [Conv_Up_Temporal_Block(nfilters, w, padding="same", act=act, pool=False) for i in range(dept)]
 
         self.cv_out = Conv3D(1, (1, w, w), padding="same", activation=None)
 
         self.act_out = Activation("sigmoid") if out == "sigmoid" else Mpi()
 
     def call(self, inputs):
-        x = tf.expand_dims(inputs, -1)
-
+        if len(tf.shape(inputs)) == 4:
+            x = tf.expand_dims(inputs, -1)
+        else:
+            x = inputs
         for i in range(len(self.cv)):
             x = self.cv[i](x)
 
@@ -82,16 +86,19 @@ class CNNTBLayer(tf.keras.layers.Layer):
 
 # Define a custom layer for probe function
 class RefineLayer(tf.keras.layers.Layer):
-    def __init__(self, mask, n_step=5, mode="multi_c", **kwargs):
+    def __init__(self, mask, n_step=5, probe_mode="multi_c", **kwargs):
         super(RefineLayer, self).__init__(**kwargs)
         self.mask = mask
 
-        self.alpha = tf.Variable(0.1, trainable=True, dtype="float32", name="alpha")
+        if n_step > 0:
+            self.alpha = tf.Variable(0.1, trainable=True, dtype="float32", name="alpha")
+
+        # self.probe_scale = tf.Variable(1.0, trainable=True, dtype="float32", name="probe_scale")
 
         self.n_step = n_step
-        self.mode = mode
+        self.probe_mode = probe_mode
 
-        if "c" in self.mode:
+        if "c" in self.probe_mode:
             self.cnn_tb_a = CNNTBLayer(out="sigmoid")
             self.cnn_tb_p = CNNTBLayer(out="")
 
@@ -102,13 +109,15 @@ class RefineLayer(tf.keras.layers.Layer):
             objects (_type_): shape [B,T,H,W]
             org_intensity (_type_): shape [B,T,H,W]
         """
-        if "single" in self.mode:
+        # probe = probe * tf.cast(self.probe_scale, "complex64")
+
+        if "single" in self.probe_mode:
             prob_tf_abs = tf.cast(tf.reduce_max(tf.abs(probe) ** 2.0), "complex64")
         else:
             prob_tf_abs = tf.cast(tf.reduce_sum(tf.reduce_max(tf.abs(probe) ** 2, axis=(-2, -1)), 0), "complex64")
 
         for i in range(self.n_step):
-            if "single" in self.mode:
+            if "single" in self.probe_mode:
                 # probe shape [1,H,W], objects shape [B,T,H,W] -> pre_exit shape [B,T,H,W]
                 pre_exit = probe * objects
 
@@ -132,24 +141,26 @@ class RefineLayer(tf.keras.layers.Layer):
             # real space costraint
             dexit = exitw - pre_exit
 
-            if self.mode == "single":
+            if self.probe_mode == "single":
                 update = tf.cast(self.alpha, "complex64") * tf.math.conj(probe) * dexit / prob_tf_abs
                 objects += update
 
-            elif self.mode == "single_c":
+            elif self.probe_mode == "single_c":
                 invert_update = tf.math.conj(probe) * dexit / prob_tf_abs
 
-                update_a = self.cnn_tb_a(tf.math.abs(invert_update))
-                update_p = self.cnn_tb_p(tf.math.angle(invert_update))
-                if self.mask is not None:
-                    update_p *= self.mask
-                    update_a *= self.mask
+                update_a = self.cnn_tb_a(
+                    tf.math.abs(invert_update) * self.mask if self.mask is not None else tf.math.abs(invert_update)
+                )
+
+                update_p = self.cnn_tb_p(
+                    tf.math.angle(invert_update) * self.mask if self.mask is not None else tf.math.angle(invert_update)
+                )
 
                 update = combine_complex(update_a, update_p)
 
                 objects = tf.cast(self.alpha, "complex64") * update + objects
 
-            elif self.mode == "multi":
+            elif self.probe_mode == "multi":
                 invert_update = tf.reduce_sum(tf.math.conj(probe) * dexit, 1) / prob_tf_abs
 
                 update_a = tf.math.abs(invert_update)
@@ -167,7 +178,7 @@ class RefineLayer(tf.keras.layers.Layer):
                 # dexit shape [B,M,T,H,W], probe shape [M,1,H,W] -> [B,M,T,H,W] -> summing over mode probe, invert_update shape [B,T,H,W]
                 invert_update = tf.reduce_sum(tf.math.conj(probe) * dexit, 1) / prob_tf_abs
 
-                update_a = self.cnn_tb_a(tf.math.abs(invert_update))
+                update_a = self.cnn_tb_a(tf.math.abs(invert_update) * self.mask if self.mask is not None else tf.math.abs(invert_update))
 
                 update_p = self.cnn_tb_p(
                     tf.math.angle(invert_update) * self.mask if self.mask is not None else tf.math.angle(invert_update)
@@ -177,7 +188,7 @@ class RefineLayer(tf.keras.layers.Layer):
 
                 objects = tf.cast(self.alpha, "complex64") * update + objects
 
-        if "single" in self.mode:
+        if "single" in self.probe_mode:
             pre_exit = probe * objects
 
             dif = fftshift(fft2d(pre_exit), axes=(-2, -1)) / fftconst
@@ -192,9 +203,10 @@ class RefineLayer(tf.keras.layers.Layer):
         return intensity, objects
 
 
-class Conv_Down_block_3D_c(keras.layers.Layer):
+# kernel_regularizer=l2(1e-5)
+class Conv_Down_Temporal_Block(keras.layers.Layer):
     def __init__(self, nfilters, w=3, p=2, padding="same", pool=None, act="swish", name="", **kwargs):
-        super(Conv_Down_block_3D_c, self).__init__(name=name, **kwargs)
+        super(Conv_Down_Temporal_Block, self).__init__(name=name, **kwargs)
 
         self.cv = Conv3D(nfilters, (1, 1, 1), padding=padding, activation=act, kernel_regularizer=l2(1e-5))
 
@@ -237,9 +249,9 @@ class Conv_Down_block_3D_c(keras.layers.Layer):
 
 
 # decoder layer
-class Conv_Up_block_3D_c(keras.layers.Layer):
+class Conv_Up_Temporal_Block(keras.layers.Layer):
     def __init__(self, nfilters, w=3, padding="same", trans=True, act="swish", name="", **kwargs):
-        super(Conv_Up_block_3D_c, self).__init__(name=name, **kwargs)
+        super(Conv_Down_Temporal_Block, self).__init__(name=name, **kwargs)
 
         self.cv = Conv3D(nfilters, (1, 1, 1), padding=padding, activation=act, kernel_regularizer=l2(1e-5))
 
@@ -280,8 +292,8 @@ class Conv_Down_block(keras.layers.Layer):
     def __init__(self, nfilters, w=3, p=2, padding="same", pool=None, act="swish", **kwargs):
         super(Conv_Down_block, self).__init__(**kwargs)
 
-        self.cv1 = Conv2D(nfilters, w, padding=padding, activation=act)
-        self.cv2 = Conv2D(nfilters, w, padding=padding, activation=act)
+        self.cv1 = Conv2D(nfilters, w, padding=padding, activation=act, kernel_regularizer=l2(1e-5))
+        self.cv2 = Conv2D(nfilters, w, padding=padding, activation=act, kernel_regularizer=l2(1e-5))
 
         if pool == "max":
             self.pool = MaxPool2D(
@@ -307,25 +319,10 @@ class Conv_Up_block(keras.layers.Layer):
     def __init__(self, nfilters, w=3, padding="same", act="swish", trans=True, **kwargs):
         super(Conv_Up_block, self).__init__(**kwargs)
 
-        self.cv1 = Conv2D(
-            nfilters,
-            w,
-            padding=padding,
-            activation=act,
-        )
-        self.cv2 = Conv2D(
-            nfilters,
-            w,
-            padding=padding,
-            activation=act,
-        )
+        self.cv1 = Conv2D(nfilters, w, padding=padding, activation=act, kernel_regularizer=l2(1e-5))
+        self.cv2 = Conv2D(nfilters, w, padding=padding, activation=act, kernel_regularizer=l2(1e-5))
 
-        self.tcv = Conv2DTranspose(
-            nfilters,
-            w,
-            strides=2,
-            padding=padding,
-        )
+        self.tcv = Conv2DTranspose(nfilters, w, strides=2, padding=padding, kernel_regularizer=l2(1e-5))
 
     def call(self, x):
         x = self.cv1(x)
@@ -334,12 +331,3 @@ class Conv_Up_block(keras.layers.Layer):
         x = self.tcv(x)
         return x
 
-
-# # mean over B,T -> prob_up shape [M,H,W]
-# prob_up = (
-#     0.1
-#     * tf.reduce_sum(tf.reduce_mean(tf.math.conj(objects) * dexit, axis=2, keepdims=True), 0)
-#     / tf.cast(tf.reduce_max(tf.abs(objects) ** 2.0), "complex64")
-# )
-
-# probe_lr.update_probe(prob_up)

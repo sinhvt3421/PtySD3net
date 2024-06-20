@@ -2,7 +2,7 @@ import tensorflow as tf
 import tensorflow.keras as keras
 import tensorflow.keras.backend as K
 from tensorflow.keras import regularizers
-from .base_layers import Conv_Down_block_3D_c, Conv_Down_block
+from .base_layers import Conv_Down_Temporal_Block, Conv_Down_block
 
 
 class TBEncoder(keras.layers.Layer):
@@ -10,11 +10,11 @@ class TBEncoder(keras.layers.Layer):
         super(TBEncoder, self).__init__(name=name, **kwargs)
 
         self.tb_down = [
-            Conv_Down_block_3D_c(filters * 2**i, w, k_pool, pool=pool, act=activation, name="tb_encoder_{}".format(i))
+            Conv_Down_Temporal_Block(filters * 2**i, w, k_pool, pool=pool, act=activation, name="tb_encoder_{}".format(i))
             for i in range(n_layers)
         ]
 
-        self.latent = Conv_Down_block_3D_c(filters * 2 ** (n_layers - 1), w, act=activation, pool=None, name="latent")
+        self.latent = Conv_Down_Temporal_Block(filters * 2 ** (n_layers - 1), w, act=activation, pool=None, name="latent")
 
     def call(self, x):
         for i in range(len(self.tb_down)):

@@ -1,4 +1,3 @@
-import glob
 import os
 
 import numpy as np
@@ -6,11 +5,9 @@ import tensorflow as tf
 import yaml
 from ptynet.layers import *
 from ptynet.losses import *
-from tensorflow.keras import Model
 from tensorflow.keras.callbacks import *
-from tensorflow.keras.layers import Conv2D, Input, Lambda
 from tensorflow.keras.optimizers.schedules import CosineDecay, ExponentialDecay
-from utils.datagenerator_unsp import DataIteratorUsp
+from utils.datagenerator_ssp import DataIteratorSsp
 from utils.general import dataset_functions
 import time
 
@@ -30,11 +27,15 @@ class PtyBase:
         cfgh = self.config["hyper"]
         self.data_exp = dataset_functions[cfgh["sample"]](self.config)
 
-        self.trainIter = DataIteratorUsp(
+        self.trainIter = DataIteratorSsp(
             self.data_exp,
             batch_size=cfgh["batch_size"],
             image_size=self.config["model"]["img_size"],
-            n_time=self.config["hyper"]["n_time"] if self.config["model"]["mode"] == "3d" else 1,
+            n_time=(
+                1
+                if (self.config["model"]["mode"] == "2d") or (self.config["model"]["mode"] == "ptychonn")
+                else self.config["hyper"]["n_time"]
+            ),
         )
 
     def create_callbacks(self):
@@ -54,7 +55,7 @@ class PtyBase:
         return callbacks
 
     def create_loss_op(self):
-        loss = negative_log_loss if self.config["hyper"]["dist"] else masked_SEloss
+        loss = negative_log_loss(self.config["hyper"]['loss']) if self.config["hyper"]["dist"] else masked_SEloss
         return loss
 
     def train(self, epochs):
@@ -107,23 +108,23 @@ class PtyBase:
         padding = self.config["model"]["img_size"] - self.data_exp.shape[-1]
 
         if padding > 0:
-            if self.config["model"]["mode"] == "2d":
+            if self.config["model"]["mode"] == "2d" or self.config["model"]["mode"] == "ptychonn":
                 pad = ((0, 0), (padding // 2, padding // 2), (padding // 2, padding // 2))
             else:
                 pad = ((0, 0), (0, 0), (padding // 2, padding // 2), (padding // 2, padding // 2))
 
-        if self.config["model"]["mode"] == "2d":
+        if self.config["model"]["mode"] == "2d" or self.config["model"]["mode"] == "ptychonn":
             size = self.config["hyper"]["batch_size"]
         else:
             size = self.config["hyper"]["n_time"]
 
-        for idx in range(0, len(self.data_exp) - size + 1, size):
-            diff = self.data_exp[idx : idx + size]
-            if self.config["model"]["mode"] == "3d":
+        for idx in range(0, len(self.data_exp)//size + 1, 1):
+            diff = self.data_exp[idx*size : (idx+1)* size]
+
+            if (self.config["model"]["mode"] != "2d") and (self.config["model"]["mode"] != "ptychonn"):
                 diff = diff[None, ...]
             if padding > 0:
                 diff = np.pad(diff, pad)
-
             _, a, p = self.model(diff)
 
             all_predict_a.append(a)
@@ -137,3 +138,4 @@ class PtyBase:
             "{}/object_reconstruction_{}.npz".format(self.config["hyper"]["save_path"], self.config["model"]["mode"]),
             [all_predict_a, all_predict_p],
         )
+
